@@ -1,23 +1,3 @@
-"""
-Classic lane perception baseline built on OpenCV.
-
-Pipeline:
-  BGR image -> HSV color mask (optional) -> Canny -> ROI -> HoughLinesP
-  -> average left/right lines -> overlay + steering angle
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
-
-import cv2
-import numpy as np
-
-Vertex = Tuple[int, int]
-Line = Tuple[int, int, int, int]
-
-
 @dataclass(frozen=True)
 class LaneDetectionResult:
     edges: np.ndarray
@@ -40,6 +20,16 @@ def _blur(gray: np.ndarray, k: int) -> np.ndarray:
 
 def _canny(gray: np.ndarray, low: int, high: int) -> np.ndarray:
     return cv2.Canny(gray, int(low), int(high))
+
+
+def _auto_canny_thresholds(gray: np.ndarray, sigma: float = 0.33) -> Tuple[int, int]:
+    median = float(np.median(gray))
+    lower = int(max(0, (1.0 - sigma) * median))
+    upper = int(min(255, (1.0 + sigma) * median))
+    # Ensure we always have a valid, non-zero range
+    if lower == upper:
+        upper = min(255, lower + 1)
+    return lower, upper
 
 
 def hsv_color_mask(bgr: np.ndarray, mode: str) -> np.ndarray:
@@ -67,40 +57,7 @@ def hsv_color_mask(bgr: np.ndarray, mode: str) -> np.ndarray:
     else:
         raise ValueError(f"Unknown mask mode: {mode}. Choose from none|blue|white|yellow")
 
-    mask = cv2.inRange(hsv, lower, upper)
-    return cv2.bitwise_and(bgr, bgr, mask=mask)
-
-
-def region_of_interest(img: np.ndarray, vertices: Sequence[Vertex]) -> np.ndarray:
-    mask = np.zeros_like(img)
-    color = (255,) * img.shape[2] if img.ndim == 3 else 255
-    cv2.fillPoly(mask, [np.array(vertices, dtype=np.int32)], color)
-    return cv2.bitwise_and(img, mask)
-
-
-def _auto_roi(height: int, width: int) -> Tuple[Vertex, ...]:
-    # trapezoid — ok for synthetic sample and many dashcam-like frames
-    return (
-        (int(width * 0.05), height),
-        (int(width * 0.45), int(height * 0.60)),
-        (int(width * 0.55), int(height * 0.60)),
-        (int(width * 0.95), height),
-    )
-
-
-def _hough_lines(
-    edges: np.ndarray,
-    rho: float,
-    theta: float,
-    threshold: int,
-    min_line_length: int,
-    max_line_gap: int,
-):
-    return cv2.HoughLinesP(
-        edges,
-        rho=rho,
-        theta=theta,
-        threshold=int(threshold),
+@@ -104,146 +114,156 @@ def _hough_lines(
         minLineLength=int(min_line_length),
         maxLineGap=int(max_line_gap),
     )
@@ -126,8 +83,8 @@ def average_slope_intercept(
     line_segments: Iterable[Line],
     slope_threshold: float = 0.5,
 ) -> List[Line]:
-    left: List[Tuple[float, float]] = []
-    right: List[Tuple[float, float]] = []
+    left: List[Tuple[float, float, float]] = []  # slope, intercept, length
+    right: List[Tuple[float, float, float]] = []
 
     for seg in line_segments:
         si = _slope_intercept(seg)
@@ -139,7 +96,9 @@ def average_slope_intercept(
         if abs(slope) < slope_threshold:
             continue
 
-        (left if slope < 0 else right).append((slope, intercept))
+        x1, y1, x2, y2 = seg
+        length = float(np.hypot(x2 - x1, y2 - y1))
+        (left if slope < 0 else right).append((slope, intercept, length))
 
     h = image.shape[0]
     y1 = h
@@ -149,8 +108,11 @@ def average_slope_intercept(
     for group in (left, right):
         if not group:
             continue
-        slope = float(np.mean([g[0] for g in group]))
-        intercept = float(np.mean([g[1] for g in group]))
+        weights = np.array([g[2] for g in group])
+        slopes = np.array([g[0] for g in group])
+        intercepts = np.array([g[1] for g in group])
+        slope = float(np.average(slopes, weights=weights))
+        intercept = float(np.average(intercepts, weights=weights))
         lanes.append(_make_line(y1, y2, slope, intercept))
 
     return lanes
@@ -184,20 +146,23 @@ def compute_steering_angle_deg(image: np.ndarray, lane_lines: Sequence[Line]) ->
 
     h, w = image.shape[:2]
 
-    if len(lane_lines) == 1:
-        x1, y1, x2, y2 = lane_lines[0]
+    # Sort by slope so lanes are consistently left (negative slope) then right
+    sorted_lines = sorted(lane_lines, key=lambda ln: _slope_intercept(ln)[0] if _slope_intercept(ln) else 0)
+
+    if len(sorted_lines) == 1:
+        x1, _, x2, _ = sorted_lines[0]
         x_offset = x2 - x1
     else:
-        left, right = lane_lines[0], lane_lines[1]
+        left, right = sorted_lines[0], sorted_lines[-1]
         _, _, lx2, _ = left
         _, _, rx2, _ = right
         x_offset = (lx2 + rx2) / 2 - (w / 2)
 
     y_offset = h * 0.60  # look-ahead distance
-    angle_rad = np.arctan2(y_offset, x_offset if x_offset != 0 else 1e-6)
+    angle_rad = np.arctan2(x_offset, y_offset if y_offset != 0 else 1e-6)
     angle_deg = float(angle_rad * 180.0 / np.pi)
 
-    steering = 90.0 - angle_deg
+    steering = 90.0 + angle_deg
     return float(np.clip(steering, 0.0, 180.0))
 
 
@@ -205,15 +170,16 @@ def detect_lanes(
     image: np.ndarray,
     mask_mode: str = "blue",
     roi_vertices: Optional[Sequence[Vertex]] = None,
-    canny_low: int = 50,
-    canny_high: int = 150,
+    canny_low: Optional[int] = None,
+    canny_high: Optional[int] = None,
+    auto_canny_sigma: float = 0.33,
     gaussian_kernel: int = 5,
     hough_rho: float = 2.0,
     hough_theta: float = np.pi / 180.0,
-    hough_threshold: int = 50,
-    min_line_length: int = 40,
-    max_line_gap: int = 100,
-    slope_threshold: float = 0.5,
+    hough_threshold: int = 15,
+    min_line_length: int = 20,
+    max_line_gap: int = 30,
+    slope_threshold: float = 0.4,
 ) -> LaneDetectionResult:
     if image is None or image.size == 0:
         raise ValueError("Empty image provided")
@@ -221,7 +187,8 @@ def detect_lanes(
     masked_bgr = hsv_color_mask(image, mask_mode)
     gray = _to_gray(masked_bgr)
     blurred = _blur(gray, gaussian_kernel)
-    edges = _canny(blurred, canny_low, canny_high)
+    low, high = (int(canny_low), int(canny_high)) if canny_low is not None and canny_high is not None else _auto_canny_thresholds(blurred, sigma=auto_canny_sigma)
+    edges = _canny(blurred, low, high)
 
     if roi_vertices is None:
         roi_vertices = _auto_roi(edges.shape[0], edges.shape[1])
@@ -247,27 +214,3 @@ def detect_lanes(
 
 
 def generate_synthetic_lane(
-    width: int = 640,
-    height: int = 360,
-    lane_color_bgr=(255, 0, 0),  # blue in BGR
-    background_bgr=(20, 20, 20),
-    thickness: int = 12,
-    curvature_px: int = 0,
-) -> np.ndarray:
-    """
-    Generate a deterministic synthetic lane image for demos/tests.
-
-    curvature_px shifts top points left/right to simulate a gentle curve.
-    """
-    img = np.full((height, width, 3), background_bgr, dtype=np.uint8)
-    bottom_y = height - 20
-    top_y = int(height * 0.60)
-
-    left_bottom = (int(width * 0.20), bottom_y)
-    right_bottom = (int(width * 0.80), bottom_y)
-    left_top = (int(width * 0.45) + int(curvature_px), top_y)
-    right_top = (int(width * 0.55) + int(curvature_px), top_y)
-
-    cv2.line(img, left_bottom, left_top, lane_color_bgr, int(thickness))
-    cv2.line(img, right_bottom, right_top, lane_color_bgr, int(thickness))
-    return img
