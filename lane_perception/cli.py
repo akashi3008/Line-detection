@@ -1,8 +1,3 @@
-"""CLI for lane perception baseline."""
-
-from __future__ import annotations
-
-import argparse
 from pathlib import Path
 
 import cv2
@@ -28,6 +23,7 @@ def _cmd_detect(args: argparse.Namespace) -> int:
         mask_mode=args.mask,
         canny_low=args.canny_low,
         canny_high=args.canny_high,
+        auto_canny_sigma=args.auto_canny_sigma,
         gaussian_kernel=args.gaussian_kernel,
         hough_threshold=args.hough_threshold,
         min_line_length=args.min_line_length,
@@ -38,6 +34,16 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(args.output), res.overlay)
     print(f"Wrote overlay to {args.output}")
+
+    if args.save_edges:
+        args.save_edges.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(args.save_edges), res.edges)
+        print(f"Wrote edges to {args.save_edges}")
+
+    if args.save_masked:
+        args.save_masked.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(args.save_masked), res.masked_edges)
+        print(f"Wrote masked edges to {args.save_masked}")
 
     if args.steering:
         angle = compute_steering_angle_deg(img, res.lane_lines)
@@ -61,13 +67,16 @@ def main() -> int:
     d.add_argument("--image", type=Path, required=True)
     d.add_argument("--output", type=Path, default=Path("outputs/overlay.png"))
     d.add_argument("--mask", choices=["none", "blue", "white", "yellow"], default="blue")
-    d.add_argument("--canny-low", type=int, default=50)
-    d.add_argument("--canny-high", type=int, default=150)
+    d.add_argument("--canny-low", type=int, default=None, help="Lower Canny threshold (auto if omitted)")
+    d.add_argument("--canny-high", type=int, default=None, help="Upper Canny threshold (auto if omitted)")
+    d.add_argument("--auto-canny-sigma", type=float, default=0.33, help="Sigma used for auto Canny thresholds")
     d.add_argument("--gaussian-kernel", type=int, default=5)
-    d.add_argument("--hough-threshold", type=int, default=50)
-    d.add_argument("--min-line-length", type=int, default=40)
-    d.add_argument("--max-line-gap", type=int, default=100)
-    d.add_argument("--slope-threshold", type=float, default=0.5)
+    d.add_argument("--hough-threshold", type=int, default=15)
+    d.add_argument("--min-line-length", type=int, default=20)
+    d.add_argument("--max-line-gap", type=int, default=30)
+    d.add_argument("--slope-threshold", type=float, default=0.4)
+    d.add_argument("--save-edges", type=Path, help="Optional path to save raw Canny edges")
+    d.add_argument("--save-masked", type=Path, help="Optional path to save ROI-masked edges")
     d.add_argument("--steering", action="store_true", help="Print steering angle estimate")
     d.set_defaults(func=_cmd_detect)
 
