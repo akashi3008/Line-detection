@@ -16,6 +16,10 @@ python -m lane_perception.cli detect --image examples/synthetic_lane.png --outpu
 pytest -q
 ```
 
+CLI tips:
+- Canny thresholds now default to **auto** (median-based). Override with `--canny-low/--canny-high` if needed.
+- Save intermediates for debugging with `--save-edges outputs/edges.png --save-masked outputs/masked.png`.
+
 ## Notes (ruthless mentor edition)
 
 - This is a **baseline**, not ADAS-grade lane detection. Real roads need temporal filtering, better segmentation, and camera calibration.
