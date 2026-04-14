@@ -20,7 +20,4 @@ CLI tips:
 - Canny thresholds now default to **auto** (median-based). Override with `--canny-low/--canny-high` if needed.
 - Save intermediates for debugging with `--save-edges outputs/edges.png --save-masked outputs/masked.png`.
 
-## Notes (ruthless mentor edition)
 
-- This is a **baseline**, not ADAS-grade lane detection. Real roads need temporal filtering, better segmentation, and camera calibration.
-- What makes this portfolio-worthy is **engineering discipline**: packaging, CLI, deterministic synthetic test data, and tests.
